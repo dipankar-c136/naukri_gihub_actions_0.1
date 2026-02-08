@@ -90,8 +90,8 @@ public class NaukriBot {
                 takeScreenshot(driver, "otp_inputs_visible");
                 handleOtpLogic(driver, otpInputs);
             } else {
-                log("⚠️ Unknown State: Not on dashboard, No Error detected, No OTP inputs found.");
-                log("Dumping page text for analysis:");
+                log("⚠️ Unknown State: Not on dashboard, and no obvious error found.");
+                log("Check screenshot '03_after_click.png' to see what happened.");
                 System.out.println(driver.findElement(By.tagName("body")).getText());
             }
 
@@ -105,32 +105,34 @@ public class NaukriBot {
         }
     }
 
-    // --- NEW: ERROR CHECKER ---
+    // --- IMPROVED ERROR CHECKER ---
     private static boolean checkForErrorText(WebDriver driver) {
-        boolean errorFound = false;
         try {
-            // Check specific Naukri error classes
-            List<WebElement> errors = driver.findElements(By.cssSelector(".server-error, .err, .validation-error, .r-error-msg"));
-
+            // 1. Check specific Naukri error banners (Red text)
+            List<WebElement> errors = driver.findElements(By.cssSelector(".server-error, .err, .validation-error, .r-error-msg, .error-message"));
             for (WebElement err : errors) {
                 if (err.isDisplayed() && !err.getText().trim().isEmpty()) {
-                    System.err.println("❌ SCREEN ERROR FOUND: [" + err.getText() + "]");
-                    errorFound = true;
+                    System.err.println("❌ SCREEN ERROR DETECTED: " + err.getText());
+                    return true;
                 }
             }
 
-            // Fallback: Check for keywords in body if classes missed it
-            if (!errorFound) {
-                String bodyText = driver.findElement(By.tagName("body")).getText().toLowerCase();
-                if (bodyText.contains("maximum attempts") || bodyText.contains("incorrect password") || bodyText.contains("something went wrong")) {
-                    System.err.println("❌ TEXT ERROR FOUND: It seems an error message is visible on the page.");
-                    errorFound = true;
-                }
+            // 2. Check Page Source for specific keywords (Fail-safe)
+            String pageText = driver.findElement(By.tagName("body")).getText().toLowerCase();
+
+            // Added "max limit" and "require otp" based on your logs
+            if (pageText.contains("max limit") ||
+                    pageText.contains("incorrect password") ||
+                    pageText.contains("require otp to login")) {
+
+                System.err.println("❌ TEXT ERROR DETECTED: The page contains error text (Max Limit or Login Blocked).");
+                return true;
             }
+
         } catch (Exception e) {
             log("Error checking failed: " + e.getMessage());
         }
-        return errorFound;
+        return false;
     }
 
     // --- OTP LOGIC ---
