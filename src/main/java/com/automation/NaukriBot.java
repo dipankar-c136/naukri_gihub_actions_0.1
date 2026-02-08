@@ -22,7 +22,11 @@ import java.util.regex.Pattern;
 
 public class NaukriBot {
 
+    // Counter to keep screenshots ordered (01, 02, 03...)
+    private static int snapCounter = 1;
+
     public static void main(String[] args) {
+        // Setup Driver
         WebDriverManager.chromedriver().setup();
 
         ChromeOptions options = new ChromeOptions();
@@ -36,168 +40,233 @@ public class NaukriBot {
         options.setExperimentalOption("useAutomationExtension", false);
 
         WebDriver driver = new ChromeDriver(options);
+        // Hide WebDriver flag
         ((JavascriptExecutor) driver).executeScript("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})");
 
         try {
-            System.out.println("🚀 Starting Naukri Bot...");
+            log("🚀 Starting Naukri Bot...");
             driver.get("https://www.naukri.com/nlogin/login");
 
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(20));
             wait.until(ExpectedConditions.visibilityOfElementLocated(By.tagName("body")));
 
+            log("Page Loaded. Title: " + driver.getTitle());
+            takeScreenshot(driver, "homepage_loaded");
+
             // --- 1. ENTER CREDENTIALS ---
+            log("Reading credentials from environment...");
             String username = System.getenv("NAUKRI_EMAIL");
             String password = System.getenv("NAUKRI_PASSWORD");
 
             if (username == null || password == null) throw new RuntimeException("Credentials missing!");
 
+            log("Typing credentials...");
             wait.until(ExpectedConditions.visibilityOfElementLocated(By.id("usernameField"))).sendKeys(username);
             driver.findElement(By.id("passwordField")).sendKeys(password);
 
+            takeScreenshot(driver, "creds_entered");
+
             // --- 2. CLICK LOGIN ---
+            log("Locating Login button...");
             WebElement loginButton = wait.until(ExpectedConditions.elementToBeClickable(By.cssSelector("button.blue-btn")));
+
+            log("Clicking Login button...");
             ((JavascriptExecutor) driver).executeScript("arguments[0].click();", loginButton);
 
-            System.out.println("✅ Login clicked. Checking for OTP wall...");
+            log("✅ Login clicked. Waiting 5s for page transition...");
             Thread.sleep(5000);
 
-            // --- 3. OTP HANDLING ---
-            List<WebElement> otpInputs = driver.findElements(By.cssSelector("input[type='tel']"));
+            // Snapshot immediately after click to see what happened
+            takeScreenshot(driver, "after_login_click");
 
-            if (!otpInputs.isEmpty()) {
-                System.out.println("🚨 OTP Screen Detected! (Found " + otpInputs.size() + " input boxes)");
-                takeScreenshot(driver, "03_otp_required.png");
+            // --- 3. CHECK STATUS (DASHBOARD vs OTP vs ERROR) ---
+            String currentUrl = driver.getCurrentUrl();
+            log("Current URL after click: " + currentUrl);
 
-                String gmailUser = System.getenv("GMAIL_USERNAME");
-                String gmailPass = System.getenv("GMAIL_APP_PASSWORD");
-
-                // Wait for the FRESH email to arrive (20 seconds)
-                System.out.println("⏳ Waiting 20s for NEW email to arrive...");
-                Thread.sleep(20000);
-
-                String otp = getOtpFromGmail(gmailUser, gmailPass);
-
-                if (otp != null) {
-                    System.out.println("✅ Extracted OTP: " + otp);
-
-                    char[] digits = otp.toCharArray();
-                    for (int i = 0; i < otpInputs.size() && i < digits.length; i++) {
-                        otpInputs.get(i).sendKeys(String.valueOf(digits[i]));
-                    }
-
-                    System.out.println("Typing complete. Submitting...");
-
-                    // Try to find Verify button (sometimes it auto-submits)
-                    try {
-                        List<WebElement> buttons = driver.findElements(By.tagName("button"));
-                        for (WebElement btn : buttons) {
-                            if (btn.getText().toLowerCase().contains("verify")) {
-                                ((JavascriptExecutor) driver).executeScript("arguments[0].click();", btn);
-                                break;
-                            }
-                        }
-                    } catch (Exception e) {
-                        System.out.println("Verify click skipped: " + e.getMessage());
-                    }
-
-                    Thread.sleep(5000);
-                } else {
-                    throw new RuntimeException("❌ Failed to find OTP email.");
-                }
+            // CASE A: Direct Success
+            if (currentUrl.contains("mnjuser")) {
+                log("🎉 SUCCESS: Redirected directly to Dashboard!");
+                return; // Exit successfully
             }
 
-            // --- 4. VERIFY SUCCESS ---
-            takeScreenshot(driver, "04_final_page.png");
+            // CASE B: OTP Screen Detection
+            // We check for input boxes or specific text
+            List<WebElement> otpInputs = driver.findElements(By.cssSelector("input[type='tel']"));
+            boolean isOtpPage = !otpInputs.isEmpty() || driver.getPageSource().contains("OTP");
+
+            if (isOtpPage) {
+                log("🚨 OTP Screen Detected! (Found " + otpInputs.size() + " input boxes)");
+                takeScreenshot(driver, "otp_screen_detected");
+
+                // --- HANDLE OTP ---
+                handleOtpLogic(driver, otpInputs);
+            }
+            else {
+                log("⚠️ No OTP inputs found, but not on dashboard either.");
+                captureErrorText(driver); // Look for error messages
+            }
+
+            // --- 4. FINAL VERIFICATION ---
+            log("Performing final check...");
+            takeScreenshot(driver, "final_state");
 
             if (driver.getCurrentUrl().contains("mnjuser")) {
-                System.out.println("🎉 SUCCESS: Login successful! We are inside.");
+                log("🎉 SUCCESS: We are inside the dashboard.");
             } else {
-                System.err.println("❌ FAILED: Still not on dashboard. Check screenshot 04.");
+                log("❌ FAILED: Script finished but URL is still: " + driver.getCurrentUrl());
+                captureErrorText(driver);
+                throw new RuntimeException("Login failed - See screenshots");
             }
 
         } catch (Exception e) {
-            System.err.println("❌ Error: " + e.getMessage());
-            takeScreenshot(driver, "ERROR_crash.png");
-            System.exit(1);
+            log("❌ CRITICAL ERROR: " + e.getMessage());
+            e.printStackTrace();
+            takeScreenshot(driver, "CRASH_FAILURE");
+            System.exit(1); // Force fail the GitHub Action
         } finally {
+            log("Shutting down driver...");
             driver.quit();
         }
     }
 
-    // --- ROBUST EMAIL PARSER (UPDATED FOR YOUR .EML FILE) ---
+    // --- LOGIC: OTP HANDLING ---
+    private static void handleOtpLogic(WebDriver driver, List<WebElement> otpInputs) throws Exception {
+        String gmailUser = System.getenv("GMAIL_USERNAME");
+        String gmailPass = System.getenv("GMAIL_APP_PASSWORD");
+
+        if (gmailUser == null || gmailPass == null) {
+            throw new RuntimeException("OTP required but Gmail secrets are missing.");
+        }
+
+        log("⏳ Waiting 20s for NEW email to arrive...");
+        Thread.sleep(20000);
+
+        String otp = getOtpFromGmail(gmailUser, gmailPass);
+
+        if (otp != null) {
+            log("✅ Extracted OTP: " + otp);
+
+            // Re-find inputs in case page refreshed
+            if(otpInputs.isEmpty()) {
+                otpInputs = driver.findElements(By.cssSelector("input[type='tel']"));
+            }
+
+            char[] digits = otp.toCharArray();
+            for (int i = 0; i < otpInputs.size() && i < digits.length; i++) {
+                otpInputs.get(i).sendKeys(String.valueOf(digits[i]));
+            }
+            log("OTP Typed into " + otpInputs.size() + " boxes.");
+            takeScreenshot(driver, "otp_entered");
+
+            // Click Verify
+            try {
+                log("Looking for Verify button...");
+                List<WebElement> buttons = driver.findElements(By.tagName("button"));
+                boolean clicked = false;
+                for (WebElement btn : buttons) {
+                    if (btn.getText().toLowerCase().contains("verify")) {
+                        ((JavascriptExecutor) driver).executeScript("arguments[0].click();", btn);
+                        log("Clicked 'Verify' button.");
+                        clicked = true;
+                        break;
+                    }
+                }
+                if (!clicked) log("⚠️ Warning: Could not find explicit 'Verify' button (might contain icon).");
+            } catch (Exception e) {
+                log("Verify click error: " + e.getMessage());
+            }
+
+            log("Waiting 5s after verification...");
+            Thread.sleep(5000);
+        } else {
+            throw new RuntimeException("❌ Failed to find OTP email in Gmail.");
+        }
+    }
+
+    // --- HELPER: LOGGING ---
+    private static void log(String message) {
+        System.out.println("[NAUKRI-BOT] " + message);
+    }
+
+    // --- HELPER: CAPTURE ERROR TEXT ---
+    private static void captureErrorText(WebDriver driver) {
+        try {
+            // Look for common error classes
+            List<WebElement> errors = driver.findElements(By.cssSelector(".error, .err, .server-error, .validation-error"));
+            if (!errors.isEmpty()) {
+                for (WebElement err : errors) {
+                    if (err.isDisplayed()) {
+                        System.err.println("❌ SCREEN ERROR FOUND: " + err.getText());
+                    }
+                }
+            } else {
+                // If no specific class, print body text snippet
+                String bodyText = driver.findElement(By.tagName("body")).getText();
+                String snippet = bodyText.length() > 200 ? bodyText.substring(0, 200) : bodyText;
+                System.err.println("❌ PAGE TEXT SNIPPET: " + snippet.replace("\n", " "));
+            }
+        } catch (Exception e) {
+            System.err.println("Could not extract error text.");
+        }
+    }
+
+    // --- HELPER: SCREENSHOT ---
+    public static void takeScreenshot(WebDriver driver, String name) {
+        try {
+            String fileName = String.format("%02d_%s.png", snapCounter++, name);
+            File scrFile = ((TakesScreenshot) driver).getScreenshotAs(OutputType.FILE);
+            FileUtils.copyFile(scrFile, new File(fileName));
+            log("📸 Screenshot saved: " + fileName);
+        } catch (IOException e) {
+            System.err.println("Failed to save screenshot: " + e.getMessage());
+        }
+    }
+
+    // --- HELPER: EMAIL PARSER ---
     public static String getOtpFromGmail(String email, String appPassword) throws Exception {
-        System.out.println("📩 Connecting to Gmail...");
+        log("📩 Connecting to Gmail...");
         Properties props = new Properties();
         props.setProperty("mail.store.protocol", "imaps");
-
         Session session = Session.getDefaultInstance(props, null);
         Store store = session.getStore("imaps");
         store.connect("imap.gmail.com", email, appPassword);
-
         Folder inbox = store.getFolder("INBOX");
         inbox.open(Folder.READ_ONLY);
 
-        // Fetch messages
         Message[] messages = inbox.search(new FlagTerm(new Flags(Flags.Flag.SEEN), false));
-        System.out.println("🔍 Found " + messages.length + " unread emails.");
+        log("🔍 Found " + messages.length + " unread emails.");
 
-        // Check the last 5 emails (Newest first)
         for (int i = messages.length - 1; i >= 0; i--) {
             Message msg = messages[i];
             String subject = msg.getSubject();
 
-            // Based on your uploaded file, this is the EXACT subject to look for:
             if (subject != null && subject.contains("Your OTP for logging in Naukri account")) {
-                System.out.println("🎯 Found Target Email: " + subject);
-
-                // Get CLEAN text (strip HTML)
+                log("🎯 Found Target Email: " + subject);
                 String content = getTextFromMessage(msg);
-
-                // Look for 6 digits (e.g., 123456)
                 Pattern p = Pattern.compile("\\b\\d{6}\\b");
                 Matcher m = p.matcher(content);
-
-                if (m.find()) {
-                    return m.group(0);
-                } else {
-                    System.out.println("⚠️ Found email but Regex failed. Content preview: " +
-                            (content.length() > 50 ? content.substring(0, 50) : content));
-                }
+                if (m.find()) return m.group(0);
             }
             if (i < messages.length - 5) break;
         }
         return null;
     }
 
-    // --- RECURSIVE CONTENT EXTRACTOR ---
     private static String getTextFromMessage(Part p) throws Exception {
         if (p.isMimeType("text/plain")) {
             return (String) p.getContent();
         }
         else if (p.isMimeType("text/html")) {
-            String html = (String) p.getContent();
-            // Convert HTML tags to spaces so numbers don't get stuck together
-            return html.replaceAll("<[^>]*>", " ");
+            return ((String) p.getContent()).replaceAll("<[^>]*>", " ");
         }
         else if (p.isMimeType("multipart/*")) {
             MimeMultipart mimeMultipart = (MimeMultipart) p.getContent();
             StringBuilder result = new StringBuilder();
             for (int i = 0; i < mimeMultipart.getCount(); i++) {
-                BodyPart bodyPart = mimeMultipart.getBodyPart(i);
-                result.append(getTextFromMessage(bodyPart));
+                result.append(getTextFromMessage(mimeMultipart.getBodyPart(i)));
             }
             return result.toString();
         }
         return "";
-    }
-
-    public static void takeScreenshot(WebDriver driver, String fileName) {
-        try {
-            File scrFile = ((TakesScreenshot) driver).getScreenshotAs(OutputType.FILE);
-            FileUtils.copyFile(scrFile, new File(fileName));
-            System.out.println("📸 Screenshot saved: " + fileName);
-        } catch (IOException e) {
-            System.err.println("Failed to save screenshot: " + e.getMessage());
-        }
     }
 }
