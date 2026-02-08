@@ -25,6 +25,9 @@ jobs:
           # This maps the GitHub Secrets to the Java System.getenv() calls
           NAUKRI_EMAIL: ${{ secrets.NAUKRI_EMAIL }}
           NAUKRI_PASSWORD: ${{ secrets.NAUKRI_PASSWORD }}
+          # 👇 ADDED: These are required for OTP Bypass
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         # Runs the main class directly using Maven exec plugin
         run: |
           mvn clean compile exec:java -Dexec.mainClass="com.automation.NaukriBot"
