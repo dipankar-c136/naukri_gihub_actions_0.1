@@ -67,8 +67,26 @@ public class NaukriBot {
             WebElement passField = driver.findElement(By.id("passwordField"));
             passField.sendKeys(password);
 
-            WebElement loginBtn = driver.findElement(By.xpath("//button[.='Login']"));
-            loginBtn.click();
+            /*WebElement loginBtn = driver.findElement(By.xpath("//button[.='Login']"));
+            loginBtn.click();*/
+
+            // LOCATOR STRATEGY:
+            // We look for the button that contains the text 'Login' BUT DOES NOT contain 'Use OTP'
+            // AND has the class 'blue-btn' (which is the styling for the main button)
+            try {
+                // 1. Wait for the specific "Login" button to be clickable
+                WebElement loginButton = wait.until(ExpectedConditions.elementToBeClickable(
+                        By.cssSelector("button.blue-btn") // This class is unique to the Password Login button
+                ));
+
+                // 2. JavaScript Click (Safest way to bypass the Invisible Recaptcha overlay)
+                // The <div class="g-recaptcha"> sits right next to the button and can sometimes block standard clicks.
+                ((JavascriptExecutor) driver).executeScript("arguments[0].click();", loginButton);
+
+            } catch (Exception e) {
+                System.out.println("Could not click login button: " + e.getMessage());
+                takeScreenshot(driver, "ERROR_login_click_failed.png");
+            }
 
             System.out.println("✅ Login clicked. Waiting for dashboard...");
             Thread.sleep(5000); // Simple wait for demo purposes
