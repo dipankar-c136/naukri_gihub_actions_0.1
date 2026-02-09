@@ -25,10 +25,11 @@ public class NaukriBot {
     private static int snapCounter = 1;
 
     public static void main(String[] args) {
+        // 1. SETUP DRIVER
         WebDriverManager.chromedriver().setup();
 
         ChromeOptions options = new ChromeOptions();
-        options.addArguments("--headless=new");
+        options.addArguments("--headless=new"); // Run in background
         options.addArguments("--window-size=1920,1080");
         options.addArguments("--no-sandbox");
         options.addArguments("--disable-dev-shm-usage");
@@ -48,7 +49,7 @@ public class NaukriBot {
             wait.until(ExpectedConditions.visibilityOfElementLocated(By.tagName("body")));
             takeScreenshot(driver, "homepage_loaded");
 
-            // --- 1. CREDENTIALS ---
+            // 2. ENTER CREDENTIALS
             log("Reading credentials...");
             String username = System.getenv("NAUKRI_EMAIL");
             String password = System.getenv("NAUKRI_PASSWORD");
@@ -60,7 +61,7 @@ public class NaukriBot {
             driver.findElement(By.id("passwordField")).sendKeys(password);
             takeScreenshot(driver, "creds_entered");
 
-            // --- 2. CLICK LOGIN ---
+            // 3. CLICK LOGIN
             log("Clicking Login button...");
             WebElement loginButton = wait.until(ExpectedConditions.elementToBeClickable(By.cssSelector("button.blue-btn")));
             ((JavascriptExecutor) driver).executeScript("arguments[0].click();", loginButton);
@@ -69,30 +70,29 @@ public class NaukriBot {
             Thread.sleep(5000);
             takeScreenshot(driver, "after_click");
 
-            // --- 3. CHECK FOR ERRORS FIRST (Priority Fix) ---
+            // 4. ERROR CHECK (Priority)
             if (checkForErrorText(driver)) {
                 log("⛔ STOPPING: Critical error found on screen. No email will be sent.");
-                return; // Exit gracefully
-            }
-
-            // --- 4. SUCCESS CHECK ---
-            if (driver.getCurrentUrl().contains("mnjuser")) {
-                log("🎉 SUCCESS: Login successful! We are inside.");
                 return;
             }
 
-            // --- 5. OTP CHECK ---
+            // 5. DIRECT SUCCESS CHECK (If no OTP asked)
+            if (driver.getCurrentUrl().contains("mnjuser")) {
+                log("🎉 SUCCESS: Direct Login! Landed on: " + driver.getCurrentUrl());
+                takeScreenshot(driver, "dashboard_success");
+                return;
+            }
+
+            // 6. OTP CHECK
             List<WebElement> otpInputs = driver.findElements(By.cssSelector("input[type='tel']"));
 
-            // Only proceed if we actually see INPUT BOXES
             if (!otpInputs.isEmpty()) {
                 log("🚨 OTP Input Boxes Detected: " + otpInputs.size());
                 takeScreenshot(driver, "otp_inputs_visible");
                 handleOtpLogic(driver, otpInputs);
             } else {
                 log("⚠️ Unknown State: Not on dashboard, and no obvious error found.");
-                log("Check screenshot '03_after_click.png' to see what happened.");
-                System.out.println(driver.findElement(By.tagName("body")).getText());
+                log("Check screenshot '03_after_click.png'.");
             }
 
         } catch (Exception e) {
@@ -103,36 +103,6 @@ public class NaukriBot {
         } finally {
             driver.quit();
         }
-    }
-
-    // --- IMPROVED ERROR CHECKER ---
-    private static boolean checkForErrorText(WebDriver driver) {
-        try {
-            // 1. Check specific Naukri error banners (Red text)
-            List<WebElement> errors = driver.findElements(By.cssSelector(".server-error, .err, .validation-error, .r-error-msg, .error-message"));
-            for (WebElement err : errors) {
-                if (err.isDisplayed() && !err.getText().trim().isEmpty()) {
-                    System.err.println("❌ SCREEN ERROR DETECTED: " + err.getText());
-                    return true;
-                }
-            }
-
-            // 2. Check Page Source for specific keywords (Fail-safe)
-            String pageText = driver.findElement(By.tagName("body")).getText().toLowerCase();
-
-            // Added "max limit" and "require otp" based on your logs
-            if (pageText.contains("max limit") ||
-                    pageText.contains("incorrect password") ||
-                    pageText.contains("require otp to login")) {
-
-                System.err.println("❌ TEXT ERROR DETECTED: The page contains error text (Max Limit or Login Blocked).");
-                return true;
-            }
-
-        } catch (Exception e) {
-            log("Error checking failed: " + e.getMessage());
-        }
-        return false;
     }
 
     // --- OTP LOGIC ---
@@ -149,37 +119,86 @@ public class NaukriBot {
 
         if (otp != null) {
             log("✅ Extracted OTP: " + otp);
+
+            // Re-find inputs to prevent StaleElementReferenceException
+            otpInputs = driver.findElements(By.cssSelector("input[type='tel']"));
+
             char[] digits = otp.toCharArray();
+
+            // --- ENTER OTP LOGIC ---
             for (int i = 0; i < otpInputs.size() && i < digits.length; i++) {
+                // This enters the digits one by one into the 6 boxes
                 otpInputs.get(i).sendKeys(String.valueOf(digits[i]));
             }
             log("OTP Entered. Submitting...");
 
+            // --- CLICK VERIFY LOGIC ---
             try {
-                // Try clicking Verify
                 List<WebElement> buttons = driver.findElements(By.tagName("button"));
+                boolean clicked = false;
                 for (WebElement btn : buttons) {
+                    // We look for any button that says "Verify"
                     if (btn.getText().toLowerCase().contains("verify")) {
                         ((JavascriptExecutor) driver).executeScript("arguments[0].click();", btn);
+                        clicked = true;
                         break;
                     }
                 }
+                // Fallback: If no button says "Verify", click the generic submit button
+                if (!clicked) {
+                    WebElement submitBtn = driver.findElement(By.cssSelector("button[type='submit']"));
+                    ((JavascriptExecutor) driver).executeScript("arguments[0].click();", submitBtn);
+                }
             } catch (Exception e) {
-                log("Verify click skipped.");
+                log("Verify click skipped (maybe auto-submitted).");
             }
-            Thread.sleep(5000);
 
+            // --- WAIT FOR REDIRECT ---
+            log("Waiting for redirection to Dashboard (mnjuser)...");
+            try {
+                new WebDriverWait(driver, Duration.ofSeconds(15))
+                        .until(ExpectedConditions.urlContains("mnjuser"));
+            } catch (Exception e) {
+                log("Wait timed out, checking URL anyway...");
+            }
+
+            // --- FINAL VALIDATION ---
             if (driver.getCurrentUrl().contains("mnjuser")) {
-                log("🎉 SUCCESS: Login Validated!");
+                log("🎉 SUCCESS: OTP Accepted! Landed on Homepage: " + driver.getCurrentUrl());
+                takeScreenshot(driver, "dashboard_success");
             } else {
-                log("❌ FAILED: OTP Accepted but not redirected.");
+                log("❌ FAILED: OTP Accepted but still on: " + driver.getCurrentUrl());
+                takeScreenshot(driver, "otp_failed_redirect");
             }
         } else {
             throw new RuntimeException("❌ OTP Email not found.");
         }
     }
 
-    // --- UTILS ---
+    // --- UTILS: ERROR CHECKER ---
+    private static boolean checkForErrorText(WebDriver driver) {
+        try {
+            // Check Red Banners
+            List<WebElement> errors = driver.findElements(By.cssSelector(".server-error, .err, .validation-error, .r-error-msg, .error-message"));
+            for (WebElement err : errors) {
+                if (err.isDisplayed() && !err.getText().trim().isEmpty()) {
+                    System.err.println("❌ SCREEN ERROR DETECTED: " + err.getText());
+                    return true;
+                }
+            }
+            // Check Body Text
+            String pageText = driver.findElement(By.tagName("body")).getText().toLowerCase();
+            if (pageText.contains("max limit") || pageText.contains("incorrect password") || pageText.contains("require otp to login")) {
+                System.err.println("❌ TEXT ERROR DETECTED: The page contains error text.");
+                return true;
+            }
+        } catch (Exception e) {
+            log("Error checking failed: " + e.getMessage());
+        }
+        return false;
+    }
+
+    // --- UTILS: LOGGING & SCREENSHOTS ---
     private static void log(String msg) {
         System.out.println("[NAUKRI-BOT] " + msg);
     }
@@ -194,6 +213,7 @@ public class NaukriBot {
         }
     }
 
+    // --- UTILS: GMAIL FETCHING ---
     public static String getOtpFromGmail(String email, String appPassword) throws Exception {
         log("📩 Connecting to Gmail...");
         Properties props = new Properties();
@@ -205,7 +225,6 @@ public class NaukriBot {
         inbox.open(Folder.READ_ONLY);
 
         Message[] messages = inbox.search(new FlagTerm(new Flags(Flags.Flag.SEEN), false));
-
         for (int i = messages.length - 1; i >= 0; i--) {
             Message msg = messages[i];
             if (msg.getSubject() != null && msg.getSubject().contains("Your OTP for logging in Naukri account")) {
