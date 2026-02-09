@@ -10,7 +10,6 @@ import org.openqa.selenium.support.ui.WebDriverWait;
 
 import javax.mail.*;
 import javax.mail.internet.MimeMultipart;
-import javax.mail.search.FlagTerm;
 import java.io.File;
 import java.io.IOException;
 import java.time.Duration;
@@ -76,7 +75,7 @@ public class NaukriBot {
                 return;
             }
 
-            // 5. DIRECT SUCCESS CHECK (If no OTP asked)
+            // 5. DIRECT SUCCESS CHECK
             if (driver.getCurrentUrl().contains("mnjuser")) {
                 handleLoginSuccess(driver);
                 return;
@@ -104,49 +103,33 @@ public class NaukriBot {
         }
     }
 
-    // --- NEW: CENTRAL SUCCESS HANDLER ---
+    // --- SUCCESS HANDLER ---
     private static void handleLoginSuccess(WebDriver driver) throws InterruptedException {
         log("🎉 SUCCESS: Login Validated! Landed on: " + driver.getCurrentUrl());
-
-        // Wait 5 seconds specifically for the dashboard UI to render fully
         log("⏳ Waiting 5s for dashboard to load fully...");
         Thread.sleep(5000);
-
         takeScreenshot(driver, "dashboard_success");
-
-        // Call the placeholder for future actions
         performPostLoginActions(driver);
     }
 
-    // --- PLACEHOLDER FOR YOUR FUTURE LOGIC ---
     private static void performPostLoginActions(WebDriver driver) {
-        log("👉 [PLACEHOLDER] ready for next steps...");
-
-        // TODO: ADD YOUR RESUME UPDATE LOGIC HERE
-        // Example:
-        // driver.get("https://www.naukri.com/mnjuser/profile");
-        // click edit resume button...
-        // upload new resume...
-
-        log("✅ Post-login actions completed (Placeholder).");
+        log("👉 [PLACEHOLDER] Ready for next steps (Update Resume, etc.)...");
+        // Add your update logic here later
     }
 
-    // --- OTP LOGIC ---
+    // --- OTP LOGIC (Now uses Polling) ---
     private static void handleOtpLogic(WebDriver driver, List<WebElement> otpInputs) throws Exception {
         String gmailUser = System.getenv("GMAIL_USERNAME");
         String gmailPass = System.getenv("GMAIL_APP_PASSWORD");
 
         if (gmailUser == null || gmailPass == null) throw new RuntimeException("Gmail secrets missing.");
 
-        log("⏳ Waiting 20s for NEW email...");
-        Thread.sleep(20000);
-
+        // NOTE: We removed the blind Thread.sleep(20000). The getOtpFromGmail method now handles the waiting.
         String otp = getOtpFromGmail(gmailUser, gmailPass);
 
         if (otp != null) {
             log("✅ Extracted OTP: " + otp);
 
-            // Re-find inputs
             otpInputs = driver.findElements(By.cssSelector("input[type='tel']"));
             char[] digits = otp.toCharArray();
 
@@ -173,7 +156,6 @@ public class NaukriBot {
                 log("Verify click skipped (maybe auto-submitted).");
             }
 
-            // WAIT FOR REDIRECT
             log("Waiting for redirection to Dashboard (mnjuser)...");
             try {
                 new WebDriverWait(driver, Duration.ofSeconds(15))
@@ -183,7 +165,7 @@ public class NaukriBot {
             }
 
             if (driver.getCurrentUrl().contains("mnjuser")) {
-                handleLoginSuccess(driver); // Call the shared success handler
+                handleLoginSuccess(driver);
             } else {
                 log("❌ FAILED: OTP Accepted but still on: " + driver.getCurrentUrl());
                 takeScreenshot(driver, "otp_failed_redirect");
@@ -191,6 +173,64 @@ public class NaukriBot {
         } else {
             throw new RuntimeException("❌ OTP Email not found.");
         }
+    }
+
+    // --- SMART EMAIL POLLING ---
+    public static String getOtpFromGmail(String email, String appPassword) throws Exception {
+        log("📩 Connecting to Gmail...");
+        Properties props = new Properties();
+        props.setProperty("mail.store.protocol", "imaps");
+        Session session = Session.getDefaultInstance(props, null);
+        Store store = session.getStore("imaps");
+        store.connect("imap.gmail.com", email, appPassword);
+
+        Folder inbox = store.getFolder("INBOX");
+
+        long startTime = System.currentTimeMillis();
+        // Poll for 60 seconds
+        while (System.currentTimeMillis() - startTime < 60000) {
+            log("🔄 Polling inbox for OTP (Checking last 5 emails)...");
+            inbox.open(Folder.READ_ONLY);
+
+            int messageCount = inbox.getMessageCount();
+            int start = Math.max(1, messageCount - 5);
+            Message[] messages = inbox.getMessages(start, messageCount);
+
+            for (int i = messages.length - 1; i >= 0; i--) {
+                Message msg = messages[i];
+                // Check Subject
+                if (msg.getSubject() != null && msg.getSubject().contains("Your OTP for logging in Naukri account")) {
+                    // Check Time (Must be within last 3 minutes to avoid old OTPs)
+                    if (System.currentTimeMillis() - msg.getReceivedDate().getTime() < 180000) {
+                        log("🎯 Found NEW Email: " + msg.getSubject());
+                        String content = getTextFromMessage(msg);
+                        Matcher m = Pattern.compile("\\b\\d{6}\\b").matcher(content);
+                        if (m.find()) {
+                            String otp = m.group(0);
+                            inbox.close(false);
+                            store.close();
+                            return otp;
+                        }
+                    }
+                }
+            }
+            inbox.close(false);
+            Thread.sleep(5000); // Wait 5s before next check
+        }
+        store.close();
+        return null;
+    }
+
+    private static String getTextFromMessage(Part p) throws Exception {
+        if (p.isMimeType("text/plain")) return (String) p.getContent();
+        if (p.isMimeType("text/html")) return ((String) p.getContent()).replaceAll("<[^>]*>", " ");
+        if (p.isMimeType("multipart/*")) {
+            MimeMultipart mp = (MimeMultipart) p.getContent();
+            StringBuilder result = new StringBuilder();
+            for (int i = 0; i < mp.getCount(); i++) result.append(getTextFromMessage(mp.getBodyPart(i)));
+            return result.toString();
+        }
+        return "";
     }
 
     // --- UTILS ---
@@ -226,41 +266,5 @@ public class NaukriBot {
         } catch (IOException e) {
             System.err.println("Screenshot failed: " + e.getMessage());
         }
-    }
-
-    public static String getOtpFromGmail(String email, String appPassword) throws Exception {
-        log("📩 Connecting to Gmail...");
-        Properties props = new Properties();
-        props.setProperty("mail.store.protocol", "imaps");
-        Session session = Session.getDefaultInstance(props, null);
-        Store store = session.getStore("imaps");
-        store.connect("imap.gmail.com", email, appPassword);
-        Folder inbox = store.getFolder("INBOX");
-        inbox.open(Folder.READ_ONLY);
-
-        Message[] messages = inbox.search(new FlagTerm(new Flags(Flags.Flag.SEEN), false));
-        for (int i = messages.length - 1; i >= 0; i--) {
-            Message msg = messages[i];
-            if (msg.getSubject() != null && msg.getSubject().contains("Your OTP for logging in Naukri account")) {
-                log("🎯 Found Email: " + msg.getSubject());
-                String content = getTextFromMessage(msg);
-                Matcher m = Pattern.compile("\\b\\d{6}\\b").matcher(content);
-                if (m.find()) return m.group(0);
-            }
-            if (i < messages.length - 5) break;
-        }
-        return null;
-    }
-
-    private static String getTextFromMessage(Part p) throws Exception {
-        if (p.isMimeType("text/plain")) return (String) p.getContent();
-        if (p.isMimeType("text/html")) return ((String) p.getContent()).replaceAll("<[^>]*>", " ");
-        if (p.isMimeType("multipart/*")) {
-            MimeMultipart mp = (MimeMultipart) p.getContent();
-            StringBuilder result = new StringBuilder();
-            for (int i = 0; i < mp.getCount(); i++) result.append(getTextFromMessage(mp.getBodyPart(i)));
-            return result.toString();
-        }
-        return "";
     }
 }
