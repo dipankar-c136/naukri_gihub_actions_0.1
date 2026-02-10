@@ -137,6 +137,7 @@ public class NaukriBot {
                 otpInputs.get(i).sendKeys(String.valueOf(digits[i]));
             }
             log("OTP Entered. Submitting...");
+            takeScreenshot(driver, "otp_entered");
 
             try {
                 List<WebElement> buttons = driver.findElements(By.tagName("button"));
